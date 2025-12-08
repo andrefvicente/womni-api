@@ -77,13 +77,13 @@ export class ListAccountEmployees extends OpenAPIRoute {
     // Query the database for employees associated with the account
     const employeesResult = await c.env.DB_WOMNI.prepare(`
       SELECT 
-        e.id, e.locale, e.firstname, e.lastname, e.email,
+        e.id, e.locale, e.firstname, e.lastname, e.email,e.username
         e.phonePrefix, e.phone, e.active,
         ea.role, ea.createdAt, ea.updatedAt
       FROM employee e
       INNER JOIN employee_account ea ON e.id = ea.employeeId
       WHERE ea.accountId = ?
-      ORDER BY e.lastname ASC, e.firstname ASC
+      ORDER BY e.firstname ASC, e.lastname ASC
     `).bind(accountId).run();
 
     if (!employeesResult.results) {
