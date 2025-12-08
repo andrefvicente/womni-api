@@ -77,7 +77,7 @@ export class ListAccountEmployees extends OpenAPIRoute {
     // Query the database for employees associated with the account
     const employeesResult = await c.env.DB_WOMNI.prepare(`
       SELECT 
-        e.id, e.locale, e.firstname, e.lastname, e.email,e.username
+        e.id, e.locale, e.firstname, e.lastname, e.email, e.username,
         e.phonePrefix, e.phone, e.active,
         ea.role, ea.createdAt, ea.updatedAt
       FROM employee e
