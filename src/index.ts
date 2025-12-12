@@ -8,6 +8,7 @@ import { EmployeeAccountCreate } from "./endpoints/admin/employee/accounts/creat
 import { EmployeeAccountUpdate } from "./endpoints/admin/employee/accounts/update";
 import { EmployeeAccountGet } from "./endpoints/admin/employee/accounts/get";
 import { ListAccountEmployees } from "./endpoints/admin/account/employees/list";
+import { AccountCreate } from "./endpoints/admin/account/create";
 // Start a Hono app
 const app = new Hono();
 
@@ -60,6 +61,8 @@ openapi.put("/v2/employee/:employeeId/accounts/:accountId", EmployeeAccountUpdat
 openapi.get("/v2/employee/:employeeId/accounts/:accountId", EmployeeAccountGet);
 // @ts-ignore
 openapi.get("/v2/accounts/:accountId/employees", ListAccountEmployees);
+// @ts-ignore
+openapi.post("/v2/accounts", AccountCreate);
 
 
 // Export the Hono app
