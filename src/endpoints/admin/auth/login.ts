@@ -1,7 +1,6 @@
 import { Bool, OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
-import { verifyPassword } from "../../../helpers/auth";
-import { sign } from '@tsndr/cloudflare-worker-jwt';
+import { verifyPassword, generateToken } from "../../../helpers/auth";
 
 export class AuthLogin extends OpenAPIRoute {
   schema = {
@@ -131,27 +130,23 @@ export class AuthLogin extends OpenAPIRoute {
     const accounts = accountsResult.results || [];
 
     // Generate JWT token
-    if (!c.env.JWT_SECRET_KEY) {
-      throw new Error("JWT_SECRET_KEY is not configured");
-    }
-
-    const token = await sign(
+    const token = await generateToken(
+      user.id,
       {
-        employeeId: user.id,
         email: user.email,
         locale: user.locale,
         username: user.username,
         firstname: user.firstname,
-        accounts: accounts.map(account => ({
-          id: account.id,
-          partner: account.partner,
-          account: account.account,
-          role: account.role,
-          name: account.name,
-        })),
-        exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24 * 365), // 24 hours
       },
-      c.env.JWT_SECRET_KEY
+      accounts.map(account => ({
+        id: account.id,
+        partner: account.partner,
+        account: account.account,
+        role: account.role,
+        name: account.name,
+      })),
+      c.env.JWT_SECRET_KEY,
+      (60 * 60 * 24 * 365) // 1 year
     );
 
     // Return success response with user data and token

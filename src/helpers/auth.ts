@@ -1,6 +1,30 @@
-import { verify, decode } from '@tsndr/cloudflare-worker-jwt';
+import { verify, decode, sign } from '@tsndr/cloudflare-worker-jwt';
 
+/**
+ * Validates if a string is a valid JWT token format
+ * A JWT should have 3 parts separated by dots: header.payload.signature
+ */
+function isValidJWTFormat(token: string): boolean {
+	if (!token || typeof token !== 'string') {
+		return false;
+	}
 
+	const parts = token.split('.');
+	if (parts.length !== 3) {
+		return false;
+	}
+
+	// Check if each part is valid base64url (alphanumeric, '-', '_', and padding '=')
+	const base64urlRegex = /^[A-Za-z0-9_-]+=*$/;
+	return parts.every(part => {
+		if (!part || part.length === 0) {
+			return false;
+		}
+		// Remove padding for validation
+		const partWithoutPadding = part.replace(/=+$/, '');
+		return base64urlRegex.test(partWithoutPadding);
+	});
+}
 
 async function hashPassword(password: string, providedSalt?: Uint8Array): Promise<string> {
 	const encoder = new TextEncoder();
@@ -71,10 +95,17 @@ async function isAuthenticated(data: any, c: any) {
 	const authorization = data.headers["authorization"];
 
 	if (authorization) {
-		const token = authorization.replace("Bearer ", "");
+		const token = authorization.replace("Bearer ", "").trim();
 
 		if (!token) {
 			const error = new Error("token is required");
+			(error as any).status = 401;
+			throw error;
+		}
+
+		// Validate JWT format before attempting to decode
+		if (!isValidJWTFormat(token)) {
+			const error = new Error("Invalid token format");
 			(error as any).status = 401;
 			throw error;
 		}
@@ -85,7 +116,16 @@ async function isAuthenticated(data: any, c: any) {
 			return { isValid: false }
 		}
 
-		const { payload } = decode(String(token));
+		let payload;
+		try {
+			const decoded = decode(String(token));
+			payload = decoded.payload;
+		} catch (error: any) {
+			// Handle base64 decoding errors
+			const err = new Error("Invalid token: " + (error.message || "Failed to decode token"));
+			(err as any).status = 401;
+			throw err;
+		}
 
 		console.log(JSON.stringify(payload),"payload");
 
@@ -126,10 +166,67 @@ async function isAuthenticated(data: any, c: any) {
 	return { isValid: false }
 }
 
+/**
+ * Generates a JWT token for an employee with their associated accounts
+ * @param employeeId - The employee ID
+ * @param employeeData - Employee data (email, locale, username, firstname)
+ * @param accounts - Array of account objects with id, partner, account, role, name
+ * @param jwtSecretKey - JWT secret key for signing
+ * @param expirationSeconds - Optional expiration time in seconds from now. If not provided, exp will not be set in the payload.
+ * @returns Promise<string> - The signed JWT token
+ */
+async function generateToken(
+	employeeId: string,
+	employeeData: {
+		email: string;
+		locale: string;
+		username: string;
+		firstname: string;
+	},
+	accounts: Array<{
+		id: string;
+		partner: string;
+		account: string;
+		role: string;
+		name: string;
+	}>,
+	jwtSecretKey: string,
+	expirationSeconds?: number
+): Promise<string> {
+	if (!jwtSecretKey) {
+		throw new Error("JWT_SECRET_KEY is not configured");
+	}
+
+	const payload: any = {
+		employeeId,
+		email: employeeData.email,
+		locale: employeeData.locale,
+		username: employeeData.username,
+		firstname: employeeData.firstname,
+		accounts: accounts.map(account => ({
+			id: account.id,
+			partner: account.partner,
+			account: account.account,
+			role: account.role,
+			name: account.name,
+		})),
+	};
+
+	// Only set exp if explicitly provided
+	if (expirationSeconds !== undefined) {
+		payload.exp = Math.floor(Date.now() / 1000) + expirationSeconds;
+	}
+
+	const token = await sign(payload, jwtSecretKey);
+
+	return token;
+}
+
 
 export {
 	isAuthenticated,
 	verifyPassword,
-	hashPassword
+	hashPassword,
+	generateToken
 };
 

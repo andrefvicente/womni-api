@@ -2,6 +2,7 @@ import { Bool, OpenAPIRoute, Str } from "chanfana";
 import { z } from "zod";
 import { decode, verify } from '@tsndr/cloudflare-worker-jwt';
 import { ulid } from 'ulid';
+import { generateToken } from '../../../helpers/auth';
 
 export class AccountCreate extends OpenAPIRoute {
   schema = {
@@ -81,12 +82,48 @@ export class AccountCreate extends OpenAPIRoute {
       );
     }
 
-    const token = authorization.replace("Bearer ", "").trim();
-    if (!token) {
+    const authToken = authorization.replace("Bearer ", "").trim();
+    if (!authToken) {
       return Response.json(
         {
           success: false,
           error: "Invalid authorization token",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+    // Validate JWT format before attempting to decode
+    const parts = authToken.split('.');
+    if (parts.length !== 3) {
+      return Response.json(
+        {
+          success: false,
+          error: "Invalid token format",
+        },
+        {
+          status: 401,
+        }
+      );
+    }
+
+    // Check if each part is valid base64url
+    const base64urlRegex = /^[A-Za-z0-9_-]+=*$/;
+    const isValidFormat = parts.every(part => {
+      if (!part || part.length === 0) {
+        return false;
+      }
+      const partWithoutPadding = part.replace(/=+$/, '');
+      return base64urlRegex.test(partWithoutPadding);
+    });
+
+    if (!isValidFormat) {
+      return Response.json(
+        {
+          success: false,
+          error: "Invalid token format",
         },
         {
           status: 401,
@@ -107,7 +144,7 @@ export class AccountCreate extends OpenAPIRoute {
       );
     }
 
-    const isValid = await verify(token, c.env.JWT_SECRET_KEY);
+    const isValid = await verify(authToken, c.env.JWT_SECRET_KEY);
     if (!isValid) {
       return Response.json(
         {
@@ -120,7 +157,22 @@ export class AccountCreate extends OpenAPIRoute {
       );
     }
 
-    const { payload } = decode(token);
+    let payload;
+    try {
+      const decoded = decode(authToken);
+      payload = decoded.payload;
+    } catch (error: any) {
+      // Handle base64 decoding errors
+      return Response.json(
+        {
+          success: false,
+          error: "Invalid token: " + (error.message || "Failed to decode token"),
+        },
+        {
+          status: 401,
+        }
+      );
+    }
     const employeeId: string = payload["employeeId"] as string;
 
     if (!employeeId) {
@@ -192,27 +244,56 @@ export class AccountCreate extends OpenAPIRoute {
     // Default partner
     const partner = "nutsoft";
 
-    // Get current timestamp for employee_account
-    const now = new Date().toISOString();
+    // Generate ULID for employee_account id
+    const employeeAccountId = ulid();
 
-    // Insert into account table
-    const accountResult = await c.env.DB_WOMNI.prepare(`
-      INSERT INTO account (
-        id, partner, account, name, active
-      ) VALUES (?, ?, ?, ?, ?)
-    `).bind(
-      accountId,
-      partner,
-      accountSlug,
-      name.trim(),
-      1 // active
-    ).run();
+    // Use batch operation to ensure atomicity - both inserts succeed or both fail
+    // Cloudflare D1 batch operations are atomic and will rollback on any failure
+    try {
+      const results = await c.env.DB_WOMNI.batch([
+        c.env.DB_WOMNI.prepare(`
+          INSERT INTO account (
+            id, partner, account, name, active
+          ) VALUES (?, ?, ?, ?, ?)
+        `).bind(
+          accountId,
+          partner,
+          accountSlug,
+          name.trim(),
+          1 // active
+        ),
+        c.env.DB_WOMNI.prepare(`
+          INSERT INTO employee_account (
+            id, employeeId, accountId, role, createdAt, updatedAt
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(
+          employeeAccountId,
+          employeeId,
+          accountId,
+          "ADMIN",
+          +new Date(),
+          +new Date()
+        ),
+      ]);
 
-    if (!accountResult.success) {
+      // Check if both operations succeeded
+      if (!results[0].success || !results[1].success) {
+        return Response.json(
+          {
+            success: false,
+            error: "Failed to create account or associate employee with account",
+          },
+          {
+            status: 500,
+          }
+        );
+      }
+    } catch (error: any) {
+      // Batch operation failed - transaction is automatically rolled back
       return Response.json(
         {
           success: false,
-          error: "Failed to create account",
+          error: "Failed to create account: " + (error.message || "Unknown error"),
         },
         {
           status: 500,
@@ -220,46 +301,130 @@ export class AccountCreate extends OpenAPIRoute {
       );
     }
 
-    // Insert into employee_account table with ADMIN role
-    const employeeAccountResult = await c.env.DB_WOMNI.prepare(`
-      INSERT INTO employee_account (
-        employeeId, accountId, role, createdAt, updatedAt
-      ) VALUES (?, ?, ?, ?, ?)
-    `).bind(
-      employeeId,
-      accountId,
-      "ADMIN",
-      now,
-      now
-    ).run();
+    // Fetch employee data for token generation
+    const employeeResult = await c.env.DB_WOMNI.prepare(`
+      SELECT 
+        id, email, username, firstname, lastname, locale,
+        emailPersonal, emailPersonalStatus, phonePrefix, phone,
+        active, createdAt, updatedAt
+      FROM employee 
+      WHERE id = ?
+    `).bind(employeeId).run();
 
-    if (!employeeAccountResult.success) {
-      // If employee_account insert fails, we should rollback the account creation
-      // However, Cloudflare D1 doesn't support transactions, so we'll just return an error
-      // In production, you might want to delete the account here
+    if (!employeeResult.results || employeeResult.results.length === 0) {
       return Response.json(
         {
           success: false,
-          error: "Failed to associate employee with account",
+          error: "Employee not found",
+        },
+        {
+          status: 404,
+        }
+      );
+    }
+
+    const employee = employeeResult.results[0];
+
+    // Fetch all accounts associated with the employee (including the newly created one)
+    const accountsResult = await c.env.DB_WOMNI.prepare(`
+      SELECT 
+        a.id, a.name, a.partner, a.account,
+        ea.role, ea.createdAt as associationCreatedAt, ea.updatedAt as associationUpdatedAt
+      FROM account a
+      INNER JOIN employee_account ea ON a.id = ea.accountId
+      WHERE ea.employeeId = ?
+      ORDER BY a.name ASC
+    `).bind(employeeId).run();
+
+    const accounts = accountsResult.results || [];
+
+    // Generate JWT token with updated accounts list
+    let token;
+    try {
+      token = await generateToken(
+        employee.id,
+        {
+          email: employee.email,
+          locale: employee.locale,
+          username: employee.username,
+          firstname: employee.firstname,
+        },
+        accounts.map(account => ({
+          id: account.id,
+          partner: account.partner,
+          account: account.account,
+          role: account.role,
+          name: account.name,
+        })),
+        c.env.JWT_SECRET_KEY,
+        (60 * 60 * 24 * 365) // 1 year
+      );
+    } catch (error: any) {
+      return Response.json(
+        {
+          success: false,
+          error: "Failed to generate token: " + (error.message || "Unknown error"),
         },
         {
           status: 500,
         }
       );
+    }
+
+    // Call backend API to install the account
+    try {
+      const backendResponse = await fetch('https://backend.womni.store/api/v1/admin/accounts/install', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          accountId: accountId,
+          account: accountSlug,
+          partner: partner,
+          name: name.trim(),
+        }),
+      });
+
+      if (!backendResponse.ok) {
+        const errorText = await backendResponse.text();
+        console.error('Backend API error:', errorText);
+        // Don't fail the account creation if backend call fails, just log it
+        // The account was already created successfully
+      }
+    } catch (error: any) {
+      console.error('Failed to call backend API:', error.message);
+      // Don't fail the account creation if backend call fails, just log it
+      // The account was already created successfully
     }
 
     // Return the created account
     return {
       success: true,
-      result: {
-        account: {
-          id: accountId,
-          name: name.trim(),
-          partner,
-          account: accountSlug,
-          active: true,
-        },
+      token,
+      user: {
+        id: employee.id,
+        email: employee.email,
+        name: `${employee.firstname} ${employee.lastname}`,
+        locale: employee.locale,
+        username: employee.username,
+        firstname: employee.firstname,
+        lastname: employee.lastname,
+        emailPersonal: employee.emailPersonal,
+        emailPersonalStatus: employee.emailPersonalStatus,
+        phonePrefix: employee.phonePrefix,
+        phone: employee.phone,
+        active: employee.active,
+        createdAt: employee.createdAt,
+        updatedAt: employee.updatedAt,
       },
+      accounts: accounts.map(account => ({
+        id: account.id,
+        partner: account.partner,
+        account: account.account,
+        name: account.name,
+      })),
     };
   }
 }
