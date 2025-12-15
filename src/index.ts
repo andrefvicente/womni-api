@@ -17,6 +17,7 @@ app.use(
   "*",
   cors({
     origin: [
+      "https://localhost",
       "http://localhost:4200",
       "http://localhost:8100",
       "capacitor://localhost",
