@@ -61,9 +61,13 @@ openapi.put("/v2/employee/:employeeId/accounts/:accountId", EmployeeAccountUpdat
 // @ts-ignore
 openapi.get("/v2/employee/:employeeId/accounts/:accountId", EmployeeAccountGet);
 // @ts-ignore
+openapi.get("/v2/employee/search", EmployeeSearch);
+
+// @ts-ignore
 openapi.get("/v2/accounts/:accountId/employees", ListAccountEmployees);
 // @ts-ignore
 openapi.post("/v2/accounts", AccountCreate);
+
 
 
 // Export the Hono app
